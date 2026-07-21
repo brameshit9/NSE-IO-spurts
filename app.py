@@ -149,6 +149,12 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["chng_oi"] = df["oi_current"] - df["oi_previous"]
         df["pct_chng_oi"] = (df["chng_oi"] / df["oi_previous"].replace(0, pd.NA)) * 100
 
+    # Guarantee an 'ltp' column always exists -- NSE's oi-spurts endpoint
+    # frequently does NOT include a price field at all, so downstream
+    # code must never assume df["ltp"] is present.
+    if "ltp" not in df.columns:
+        df["ltp"] = pd.NA
+
     ordered = [c for c in
                ["symbol", "instrument", "expiry", "oi_current", "oi_previous",
                 "chng_oi", "pct_chng_oi", "ltp"]
