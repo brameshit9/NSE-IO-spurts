@@ -53,20 +53,45 @@ CANDIDATES = {
 }
 
 
+def _get_proxies():
+    """
+    Optional: route requests through a scraping proxy (e.g. ScraperAPI,
+    Bright Data, etc.) if configured in Streamlit secrets. This is the
+    most reliable fix for NSE blocking cloud/datacenter IPs, since the
+    proxy exits through a residential/rotating IP instead.
+
+    To use: add to .streamlit/secrets.toml (or the Streamlit Cloud
+    "Secrets" settings in the app dashboard):
+
+        PROXY_URL = "http://user:pass@proxy-host:port"
+
+    If not set, requests go direct (which works locally but may be
+    blocked/slow on cloud hosts).
+    """
+    proxy_url = st.secrets.get("PROXY_URL") if hasattr(st, "secrets") else None
+    if proxy_url:
+        return {"http": proxy_url, "https": proxy_url}
+    return None
+
+
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_oi_spurts(retries: int = 3, delay: float = 2.0) -> pd.DataFrame:
+def fetch_oi_spurts(retries: int = 4, base_delay: float = 3.0,
+                     timeout: int = 30) -> pd.DataFrame:
     session = requests.Session()
     session.headers.update(HEADERS)
+    proxies = _get_proxies()
+    if proxies:
+        session.proxies.update(proxies)
 
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            session.get(BASE_URL, timeout=10)
-            time.sleep(1)
-            session.get(HOME_URL, timeout=10)
-            time.sleep(1)
+            session.get(BASE_URL, timeout=timeout)
+            time.sleep(1.5)
+            session.get(HOME_URL, timeout=timeout)
+            time.sleep(1.5)
 
-            resp = session.get(API_URL, timeout=10)
+            resp = session.get(API_URL, timeout=timeout)
             resp.raise_for_status()
             payload = resp.json()
             rows = payload.get("data", payload) if isinstance(payload, dict) else payload
@@ -79,9 +104,15 @@ def fetch_oi_spurts(retries: int = 3, delay: float = 2.0) -> pd.DataFrame:
         except Exception as exc:
             last_error = exc
             if attempt < retries:
-                time.sleep(delay * attempt)
+                # exponential backoff: 3s, 6s, 12s, ...
+                time.sleep(base_delay * (2 ** (attempt - 1)))
 
-    raise RuntimeError(f"Failed after {retries} attempts: {last_error}")
+    raise RuntimeError(
+        f"Failed after {retries} attempts (last error: {last_error}). "
+        "This is very likely NSE blocking/throttling requests from this "
+        "server's IP range. See the README for the proxy workaround, or "
+        "try the nsepython-based fallback."
+    )
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -107,18 +138,42 @@ def main():
     if st.button("🔄 Refresh data"):
         fetch_oi_spurts.clear()
 
+    raw_df = None
+    fetch_error = None
     try:
-        with st.spinner("Fetching data from NSE..."):
+        with st.spinner("Fetching data from NSE (this can take up to ~60s)..."):
             raw_df = fetch_oi_spurts()
     except Exception as exc:
-        st.error(
-            "Could not fetch data from NSE. This usually happens because "
-            "NSE blocks requests from cloud/datacenter IPs (which is what "
-            "this app runs on when deployed). Try again, or run this app "
-            "locally on a home internet connection.\n\n"
-            f"Details: {exc}"
-        )
-        return
+        fetch_error = exc
+
+    if raw_df is None:
+        # Fallback attempt using nsepython, which handles NSE's cookie/
+        # anti-bot flow more robustly than plain requests.
+        try:
+            with st.spinner("Direct request failed, trying nsepython fallback..."):
+                import nsepython
+                raw_df = pd.DataFrame(
+                    nsepython.nsefetch(
+                        "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings"
+                    ).get("data", [])
+                )
+                if raw_df.empty:
+                    raise ValueError("nsepython also returned no data.")
+        except Exception as exc2:
+            st.error(
+                "Could not fetch data from NSE via either method. This is "
+                "very likely NSE blocking/throttling requests from this "
+                "server's IP range (common for Streamlit Cloud / GitHub "
+                "Actions / other datacenter hosts).\n\n"
+                f"Direct request error: {fetch_error}\n\n"
+                f"nsepython fallback error: {exc2}\n\n"
+                "**Options:** run this app locally on a home connection, "
+                "configure a residential proxy via `PROXY_URL` in "
+                "Streamlit secrets (see README), or fetch data locally on "
+                "a schedule and have this app read from a CSV/database "
+                "instead of calling NSE directly."
+            )
+            return
 
     df = normalize_columns(raw_df)
     for col in ["oi_current", "oi_previous", "chng_oi", "pct_chng_oi", "ltp"]:
