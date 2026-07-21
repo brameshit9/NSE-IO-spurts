@@ -42,15 +42,31 @@ Heroku, Render, etc. all use. Practically, this means:
   The app is built to fail gracefully and show a clear message instead of
   crashing, but it may not reliably return live data once deployed.
 
-### Workarounds if you hit blocking on deployment
-- Use a scraping proxy service (e.g. ScraperAPI, Bright Data) that routes
-  requests through residential IPs — swap the `requests.Session()` calls
-  in `app.py` to go through the proxy.
-- Run the fetch on a schedule from your own machine (e.g. a cron job) and
-  have it write results to a small database or CSV that the Streamlit
-  Cloud app reads instead of hitting NSE directly.
-- Self-host the Streamlit app (e.g. on a home server or a VPS with a
-  residential-like IP) rather than using Streamlit Community Cloud.
+The app now has two built-in mitigations:
+1. **Longer timeout + exponential backoff** (30s timeout, 4 retries) —
+   handles cases where NSE is just slow rather than fully blocking.
+2. **`nsepython` fallback** — if the direct `requests` approach fails,
+   the app automatically tries `nsepython`, a community library built
+   specifically to survive NSE's cookie/anti-bot checks. It's not
+   guaranteed to work from every cloud IP either, but it's noticeably
+   more reliable than plain `requests` in practice.
+
+### If it's still blocked after both attempts
+- **Residential proxy (most reliable fix):** sign up for a scraping
+  proxy service (e.g. ScraperAPI, Bright Data, Smartproxy). Add the
+  proxy URL to Streamlit Cloud's app secrets as:
+  ```toml
+  PROXY_URL = "http://user:pass@proxy-host:port"
+  ```
+  The app already reads this automatically (`_get_proxies()` in
+  `app.py`) and routes requests through it.
+- **Fetch locally, serve from the cloud:** run `nse_oi_spurts.py` on
+  your own machine on a schedule (cron / Task Scheduler), have it write
+  to a CSV or small database (e.g. a free Postgres on Supabase/Neon),
+  and point the Streamlit Cloud app at that instead of calling NSE
+  directly.
+- **Self-host:** run the Streamlit app on a home server or a VPS with a
+  residential-like IP instead of Streamlit Community Cloud.
 
 ## Note on NSE's JSON field names
 NSE occasionally changes the exact field names in their API responses.
